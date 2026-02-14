@@ -1,0 +1,28 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 37747367cda09434dae6d65d58d07e3c, type: 3}
+  m_Name: Tuning_Default
+  m_EditorClassIdentifier: Assembly-CSharp::TuningAsset
+  handCount: 7
+  loseThresholdExclusive: 3
+  maxMiss: 3
+  gaugeMax: 1
+  gainScale: 1
+  gainDenominator: 10
+  heavy: 0.6
+  balance: 0.25
+  twinTop: 0.15
+  shuffleEnvWeightsAcrossArchetypes: 1
+  uniqueMainAcrossArchetypes: 1
+  initialPoints: 10
+  pointsPerClear: 1
+  gaugeBuyAmount: 0.5
