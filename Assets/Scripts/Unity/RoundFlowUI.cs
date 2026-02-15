@@ -13,12 +13,13 @@ public sealed class RoundFlowUI : MonoBehaviour
 
     [Header("Bottom Proceed Panel")]
     [SerializeField] private Button bottomPanelButton;
-    [SerializeField] private TMP_Text bottomHintText; // 任意
+    [SerializeField] private TMP_Text bottomHintText; // 「次のページへ / 次の勝負へ」はここ（戻す）
 
     [Header("Buttons")]
     [SerializeField] private Button resolveTapCatcherButton;
     [SerializeField] private Button openAdjustButton; // 右窓の「調整」ボタン
-    [SerializeField] private Button hudDetailToggleButton; // 左ウィンドウのクリック領域（透明ボタンでOK）
+    [SerializeField] private Button hudDetailToggleButton; // 左ウィンドウのクリック領域
+
     private bool _hudDetail = false; // 既定：畳む
 
     [Header("Left Window Hint")]
@@ -26,43 +27,34 @@ public sealed class RoundFlowUI : MonoBehaviour
     [SerializeField] private string hintShowDetail = "▼ 詳細を見る";
     [SerializeField] private string hintCloseDetail = "▲ 閉じる";
 
-
-
     [Header("SafeRect Parent")]
-    [SerializeField] private GameObject mainPlayRoot;      // MainPlayRoot
-    [SerializeField] private GameObject centralWindowRoot; // CentralWindow
+    [SerializeField] private GameObject mainPlayRoot;
+    [SerializeField] private GameObject centralWindowRoot;
 
     [Header("SafeRect Children")]
     [SerializeField] private GameObject resolveRoot;
     [SerializeField] private GameObject adjustPanel;
-    [SerializeField] private GameObject rightWindowResolveRoot; // RightWindow_resolve
-    [SerializeField] private GameObject rightWindowAdjustRoot;  // RightWindow_adjust（あるなら）
-
+    [SerializeField] private GameObject rightWindowResolveRoot;
+    [SerializeField] private GameObject rightWindowAdjustRoot;
 
     [Header("Left Window Auto Size")]
-    [SerializeField] private RectTransform leftWindowRect; // HUD_Root/LeftWindow
-    [SerializeField] private TMP_Text enemyInfoText;        // EnemyInfo
-    [SerializeField] private float leftWindowPaddingY = 32f; // 上下パディング合計（適当に調整）
-    [SerializeField] private float leftWindowMinHeight = 0f; // 必要なら
+    [SerializeField] private RectTransform leftWindowRect;
+    [SerializeField] private TMP_Text enemyInfoText;
+    [SerializeField] private float leftWindowPaddingY = 32f;
+    [SerializeField] private float leftWindowMinHeight = 0f;
 
-    // RoundFlowUI.cs
     [Header("Resolve Right Window (Optional)")]
     [SerializeField] private TMP_Text resolveDeckText;
     [SerializeField] private TMP_Text resolvePointsText;
 
     [Header("Right Window HUD Raycast Block")]
-    [SerializeField] private Button[] rightHudGaugeButtons; // Gu/Choki/Pa の3つ
-
-
+    [SerializeField] private Button[] rightHudGaugeButtons;
 
     [Header("Views")]
     [SerializeField] private AdjustPanelView adjustView;
     [SerializeField] private GameHudView hud;
     [SerializeField] private TutorialOverlayView tutorial;
-    [SerializeField] private GameObject rightWindowRoot; // MainPlayRootのRightWindowを刺す
     [SerializeField] private ReservedSlotsView reservedSlotsView;
-
-
 
     [Header("Debug")]
     [SerializeField] private bool debugLog = true;
@@ -70,13 +62,16 @@ public sealed class RoundFlowUI : MonoBehaviour
     private ViewMode _viewMode = ViewMode.ResolveOnly;
     private bool _booted;
     private bool _tutorialResetDone = false;
+    // チュートリアル開始直後に7手を出す（Introラウンド）を1回だけ実行するガード
+    private bool _tutorialIntroHandsShown = false;
+
+    // DeckAdjust step中は「右の調整ボタンだけ押してね」モード
+    private bool _deckAdjustClickOnly = false;
+
     private const string HintTutorial = "次のページへ";
     private const string HintNextBattle = "次の勝負へ";
 
-
-
-
-
+    private Coroutine _fitLeftWindowCo;
 
 
     private void Reset()
@@ -86,10 +81,8 @@ public sealed class RoundFlowUI : MonoBehaviour
 
     private void Awake()
     {
-        // 参照がズレてても、少なくともUIを沈めない初期状態へ
         ForceParentsOn();
 
-        // listener は Awake で一度だけ（SetActive揺れに強く）
         if (bottomPanelButton != null)
         {
             bottomPanelButton.onClick.RemoveListener(OnProceed);
@@ -110,24 +103,29 @@ public sealed class RoundFlowUI : MonoBehaviour
 
         if (adjustView != null)
         {
-            // OnDestroyで解除する
+            adjustView.OnDraftChanged -= HandleAdjustChanged;
             adjustView.OnDraftChanged += HandleAdjustChanged;
         }
 
         if (hudDetailToggleButton != null)
+        {
+            hudDetailToggleButton.onClick.RemoveListener(ToggleHudDetail);
             hudDetailToggleButton.onClick.AddListener(ToggleHudDetail);
+        }
 
-        ApplyHudViewMode(); // ★起動時に必ず反映（勝手にDetailにならない）
+        ApplyHudViewMode();
         RefreshDetailHint();
-
     }
 
     private void Start()
     {
         if (tutorial != null)
         {
-            tutorial.OnStepChanged -= HandleTutorialStepChanged; // ★残骸対策
+            tutorial.OnStepChanged -= HandleTutorialStepChanged;
             tutorial.OnStepChanged += HandleTutorialStepChanged;
+
+            tutorial.OnFinished -= HandleTutorialFinished;
+            tutorial.OnFinished += HandleTutorialFinished;
         }
 
         SyncTutorialState();
@@ -135,34 +133,44 @@ public sealed class RoundFlowUI : MonoBehaviour
         Invoke(nameof(BootNextFrame), 0f);
     }
 
-
     private void BootNextFrame()
     {
         if (_booted) return;
         _booted = true;
 
-        if (debugLog) Log($"BootNextFrame presenter={(presenter ? "OK" : "NULL")} run={(presenter != null && presenter.Run != null ? "OK" : "NULL")}");
-
-        // presenterが無いならそれ以上進めない（ただしUIは生きてる）
         if (presenter == null)
         {
             LogError("presenter is NULL. Assign it in Inspector or ensure Reset() finds it.");
             return;
         }
 
-        // RunPresenter.Start() が ResetRun 済みなら Run があるはず。
-        // もし無いなら tuningAsset不足など。ログでわかる。
         if (presenter.Run == null)
         {
-            LogWarn("presenter.Run is NULL. Check RunPresenter.ResetRun() logs (e.g., TuningAsset missing).");
+            LogWarn("presenter.Run is NULL. Check RunPresenter.ResetRun() logs.");
             return;
         }
 
-        // Introを1回だけ回す（Round0表示を作る）
-        StartCoroutine(FitLeftWindowNextFrame());
+        // まずUIを整える
+        RequestFitLeftWindow();
+
+        // 初回ならチュートリアル起動（あなたの SessionGate 運用を尊重）
+        bool shouldTutorial = (tutorial != null && TutorialSessionGate.TryConsume());
+        if (shouldTutorial)
+        {
+            tutorial.OpenFromStart();
+            // チュートリアル中はRoundLogを空固定（被り防止）
+            if (hud != null) hud.SetRoundLog("");
+            RefreshBottomHintText();
+            ApplyTutorialGates(); // Stepに応じたクリック制御を反映
+            return; // ★Intro(7手)は StepId側で出す
+        }
+
+        // チュートリアル無し：Introを1回回して「開始」表示を作る
         presenter.PlayIntroIfNeeded();
         presenter.RefreshHud();
+        RefreshResolveRightWindow();
         RefreshProceedInteractable();
+        RefreshBottomHintText();
     }
 
     // -------------------------
@@ -171,22 +179,25 @@ public sealed class RoundFlowUI : MonoBehaviour
 
     private void OnProceed()
     {
-        // ★チュートリアル中はProceedで進行させない
-        if (tutorial != null && tutorial.IsOpen)
-            return;
+        // ★チュートリアル中は下パネル進行を禁止（連打事故防止）
+        if (tutorial != null && tutorial.IsOpen) return;
 
         if (presenter == null) { LogWarn("OnProceed: presenter NULL"); return; }
         if (presenter.Run == null) { LogWarn("OnProceed: run NULL"); return; }
 
-        // GameOver 最優先
+        // GameOver最優先
         if (presenter.Run.IsGameOver)
         {
             SceneFlow.GoToResult(presenter.Run.Score);
             return;
         }
 
-        // Resolve中：スキップ → できなければ次ラウンド
-        if (_viewMode == ViewMode.ResolveOnly)
+        bool adjustActuallyOpen =
+            (adjustPanel != null && adjustPanel.activeSelf) ||
+            (_viewMode == ViewMode.WithAdjust);
+
+        // Resolve中：スキップ→できなければ次ラウンド
+        if (!adjustActuallyOpen)
         {
             if (presenter.TrySkipResolveSequence())
                 return;
@@ -198,14 +209,14 @@ public sealed class RoundFlowUI : MonoBehaviour
             return;
         }
 
-        // Adjust中：確定できないなら止める（Proceed押せないはずだが保険）
+        // Adjust中：確定できないなら止める
         if (adjustView != null && !adjustView.TryCommitDraft())
         {
             RefreshProceedInteractable();
             return;
         }
 
-        // 次ラウンド開始
+        // Adjustを閉じて次ラウンド
         SetViewMode(ViewMode.ResolveOnly, "Proceed:CloseAdjust");
         presenter.PlayNextRound();
         presenter.RefreshHud();
@@ -221,11 +232,10 @@ public sealed class RoundFlowUI : MonoBehaviour
         if (presenter.TrySkipResolveSequence())
             return;
 
-        // ResolveTapで閉じる対象は「Adjust」のみ（誤爆防止）
+        // ResolveTapで閉じる対象はAdjustのみ
         if (_viewMode == ViewMode.WithAdjust)
         {
             SetViewMode(ViewMode.ResolveOnly, "ResolveTap:CloseAdjust");
-            ApplyHudViewMode();
             RefreshProceedInteractable();
         }
     }
@@ -239,8 +249,6 @@ public sealed class RoundFlowUI : MonoBehaviour
 
         SetViewMode(ViewMode.WithAdjust, "OpenAdjust");
 
-        // AdjustPanelViewのCloseが gameObject.SetActive(false) しても沈まないよう、
-        // Openするたび必ず adjustPanel/adjustView を起こす。
         if (adjustPanel != null) adjustPanel.SetActive(true);
         if (adjustView != null)
         {
@@ -253,10 +261,14 @@ public sealed class RoundFlowUI : MonoBehaviour
         if (reservedSlotsView != null && adjustView != null)
             reservedSlotsView.Render(adjustView.GetDraftForcedOrder());
 
-        if (tutorial != null)
-                tutorial.NotifyExternalAction();
+        // ---- チュートリアル：DeckAdjust stepなら「調整モードに移れた」＝次へ ----
+        if (tutorial != null && tutorial.IsOpen && tutorial.IsCurrentStep(TutorialOverlayView.StepId.DeckAdjust))
+        {
+            _deckAdjustClickOnly = false;
+            ApplyTutorialGates(); // gating解除
+            tutorial.Next();      // ★外部操作が完了したので進める
+        }
 
-        SyncTutorialState();
         RefreshProceedInteractable();
     }
 
@@ -269,28 +281,203 @@ public sealed class RoundFlowUI : MonoBehaviour
         if (reservedSlotsView != null && adjustView != null)
             reservedSlotsView.Render(adjustView.GetDraftForcedOrder());
 
-        // ★チュートリアル：グーを2枚予約できたら次へ（Element12想定）
-        if (tutorial != null && adjustView != null)
+        // ---- チュートリアル：ForcedDraw step（グー予約2枚で進行） ----
+        if (tutorial != null && tutorial.IsOpen && tutorial.IsCurrentStep(TutorialOverlayView.StepId.ForcedDraw))
+        {
+            if (adjustView != null)
             {
-                // StepId はあなたのElement12のidに合わせてください（例：ForcedDraw など）
-                if (tutorial.IsCurrentStep(TutorialOverlayView.StepId.ForcedDraw))
+                var order = adjustView.GetDraftForcedOrder();
+                int guCount = 0;
+
+                if (order != null)
                 {
-                    var order = adjustView.GetDraftForcedOrder();
-                    int guCount = 0;
-
-                    if (order != null)
-                    {
-                        for (int i = 0; i < order.Count; i++)
-                            if (order[i] == RpsColor.Gu) guCount++;
-                    }
-
-                    if (guCount >= 2)
-                        tutorial.Next();
+                    for (int i = 0; i < order.Count; i++)
+                        if (order[i] == RpsColor.Gu) guCount++;
                 }
-            }
 
+                if (guCount >= 2)
+                    tutorial.NotifyExternalAction(); // ここで次へ
+            }
+        }
     }
 
+    private void ToggleHudDetail()
+    {
+        _hudDetail = !_hudDetail;
+
+        ApplyHudViewMode();
+        RefreshDetailHint();
+
+        if (presenter != null)
+            presenter.RefreshHud();
+
+        if (tutorial != null && tutorial.IsOpen && tutorial.IsCurrentStep(TutorialOverlayView.StepId.EnemyInfo))
+        {
+            if (_hudDetail)
+                tutorial.NotifyExternalAction();
+        }
+
+        // ★ここを競合しにくい呼び方に
+        RequestFitLeftWindow();
+    }
+
+
+    // -------------------------
+    // Tutorial step handler
+    // -------------------------
+
+    private void HandleTutorialStepChanged(TutorialOverlayView.Step step)
+    {
+        // チュートリアル中はRoundLog空固定（被り防止）
+        if (hud != null) hud.SetRoundLog("");
+
+        ApplyTutorialGates();
+
+        if (step == null) return;
+
+        // ★Intro0到達時に「7手を出す」：チュートリアル開始直後に出したい要件
+        if (step.id == TutorialOverlayView.StepId.Intro0)
+        {
+            ShowIntroHandsOnceForTutorial();
+            return;
+        }
+
+        // Reveal7Hands に来ても、Intro0で出しているので基本何もしない（保険だけ）
+        if (step.id == TutorialOverlayView.StepId.Reveal7Hands)
+        {
+            ShowIntroHandsOnceForTutorial();
+            return;
+        }
+
+        // DeckAdjust では「右の調整ボタンだけ押して」モードにする
+        if (step.id == TutorialOverlayView.StepId.DeckAdjust)
+        {
+            EnterDeckAdjustClickOnlyMode();
+            return;
+        }
+
+        // ★StartGiftに入った瞬間に「予約/ゲージ購入ドラフト」を強制的に戻す（名残を復活）
+        if (!_tutorialResetDone && step.id == TutorialOverlayView.StepId.StartGift)
+        {
+                _tutorialResetDone = true;
+
+                if (adjustView != null)
+                    adjustView.ResetTutorialGaugeAndReservation(); // ★これが「買った分/予約した分」をドラフト側でゼロに戻す
+
+                if (reservedSlotsView != null && adjustView != null)
+                    reservedSlotsView.Render(adjustView.GetDraftForcedOrder());
+
+                // チュートリアル中はRoundLogは空固定（被り防止）
+                if (presenter != null)
+                    presenter.SetRoundLog("");
+
+                if (debugLog) Log("[Tutorial] Reset draft gaugeBuy + forcedOrder at StartGift");
+                return;
+        }
+
+        // ForcedDraw / EnemyInfo は wait step なので、tapCatcher側が勝手に止める
+        // ここでは gating だけ整える
+    }
+
+    private void ShowIntroHandsOnceForTutorial()
+    {
+        if (_tutorialIntroHandsShown) return;
+        _tutorialIntroHandsShown = true;
+
+        if (presenter == null || presenter.Run == null) return;
+
+        // Resolve表示に揃える
+        SetViewMode(ViewMode.ResolveOnly, "Tutorial:ShowIntroHands");
+
+        presenter.PlayIntroIfNeeded(); // Round0を生成して7手を出す
+        presenter.RefreshHud();
+        RefreshResolveRightWindow();
+        RefreshProceedInteractable();
+        RequestFitLeftWindow();
+    }
+
+    private void EnterDeckAdjustClickOnlyMode()
+    {
+        _deckAdjustClickOnly = true;
+
+        // Resolve表示で「調整ボタン」を押させる
+        SetViewMode(ViewMode.ResolveOnly, "Tutorial:DeckAdjust");
+
+        // Adjustが開いてたら閉じる（誤爆防止）
+        if (adjustPanel != null) adjustPanel.SetActive(false);
+
+        ApplyTutorialGates();
+        RefreshProceedInteractable();
+    }
+
+    private void ApplyTutorialGates()
+    {
+        bool tut = (tutorial != null && tutorial.IsOpen);
+
+        // チュートリアル中は下パネル進行禁止が基本
+        if (!tut)
+        {
+            _deckAdjustClickOnly = false;
+            SetButtonRaycast(bottomPanelButton, true);
+            SetButtonRaycast(resolveTapCatcherButton, true);
+            SetButtonRaycast(hudDetailToggleButton, true);
+            SetButtonRaycast(openAdjustButton, true);
+            RefreshBottomHintText();
+            return;
+        }
+
+        RefreshBottomHintText();
+
+        // デフォルト：チュートリアル中は下パネル無効（連打事故防止）
+        SetButtonRaycast(bottomPanelButton, false);
+
+        // ResolveTapは基本無効（誤タップで閉じたりしない）
+        SetButtonRaycast(resolveTapCatcherButton, false);
+
+        // 左の開閉は、EnemyInfo stepのときだけ有効にする
+        bool enemyInfo = tutorial.IsCurrentStep(TutorialOverlayView.StepId.EnemyInfo);
+        SetButtonRaycast(hudDetailToggleButton, enemyInfo);
+
+        // DeckAdjust step：右の調整ボタンだけ有効
+        if (_deckAdjustClickOnly || tutorial.IsCurrentStep(TutorialOverlayView.StepId.DeckAdjust))
+        {
+            SetButtonRaycast(openAdjustButton, true);
+
+            // 右HUDのゲージ等は触らせない（今は「調整ボタン」だけ）
+            BlockRightHudGaugeRaycast(block: true);
+            return;
+        }
+
+        // ForcedDraw step：Adjustが開いている前提で予約を触らせたいので、調整ボタンは状況次第
+        bool forcedDraw = tutorial.IsCurrentStep(TutorialOverlayView.StepId.ForcedDraw);
+        if (forcedDraw)
+        {
+            // Adjustに入る導線としては openAdjustButton は有効でOK
+            SetButtonRaycast(openAdjustButton, true);
+            BlockRightHudGaugeRaycast(block: false); // Adjust側UIを触るならここは妨げない
+            return;
+        }
+
+        // それ以外：調整ボタンは無効でもいいが、ゲーム理解のために触られて困るものがなければ有効でもOK
+        SetButtonRaycast(openAdjustButton, true);
+        BlockRightHudGaugeRaycast(block: true);
+    }
+
+    private void BlockRightHudGaugeRaycast(bool block)
+    {
+        // block=true なら、右HUDのゲージ系はraycastを取らない
+        if (rightHudGaugeButtons == null) return;
+
+        for (int i = 0; i < rightHudGaugeButtons.Length; i++)
+        {
+            var b = rightHudGaugeButtons[i];
+            if (b == null) continue;
+
+            var graphics = b.GetComponentsInChildren<Graphic>(true);
+            for (int j = 0; j < graphics.Length; j++)
+                graphics[j].raycastTarget = !block;
+        }
+    }
 
     // -------------------------
     // ViewMode core (ONLY place that toggles UI)
@@ -303,7 +490,7 @@ public sealed class RoundFlowUI : MonoBehaviour
         ForceParentsOn();
 
         bool showResolve = (m == ViewMode.ResolveOnly);
-        bool showAdjust  = (m == ViewMode.WithAdjust);
+        bool showAdjust = (m == ViewMode.WithAdjust);
 
         if (debugLog)
         {
@@ -314,22 +501,23 @@ public sealed class RoundFlowUI : MonoBehaviour
 
         if (resolveRoot != null) resolveRoot.SetActive(showResolve);
         if (adjustPanel != null) adjustPanel.SetActive(showAdjust);
+
         if (rightWindowResolveRoot != null) rightWindowResolveRoot.SetActive(showResolve);
-        if (rightWindowAdjustRoot != null)  rightWindowAdjustRoot.SetActive(showAdjust);
+        if (rightWindowAdjustRoot != null) rightWindowAdjustRoot.SetActive(showAdjust);
 
         if (resolveTapCatcherButton != null)
             resolveTapCatcherButton.gameObject.SetActive(showResolve);
 
+        // Resolve中だけ「調整ボタン」押せる
         if (openAdjustButton != null)
             openAdjustButton.interactable = showResolve;
 
-        if (_viewMode == ViewMode.ResolveOnly)
-                RefreshResolveRightWindow();
-
+        if (showResolve)
+            RefreshResolveRightWindow();
 
         // ★絶対に両方OFFにしない保険
         bool resolveOn = (resolveRoot != null && resolveRoot.activeSelf);
-        bool adjustOn  = (adjustPanel != null && adjustPanel.activeSelf);
+        bool adjustOn = (adjustPanel != null && adjustPanel.activeSelf);
         if (!resolveOn && !adjustOn)
         {
             LogError($"Both resolveRoot & adjustPanel are inactive! Force ResolveOnly. reason={reason}");
@@ -337,9 +525,8 @@ public sealed class RoundFlowUI : MonoBehaviour
             _viewMode = ViewMode.ResolveOnly;
         }
 
-        // Resolve中は「調整を開く」の邪魔になるのでゲージボタンをクリック透過
+        // Resolve中は右HUDゲージの誤爆を防ぐ（あなたの既存方針）
         bool resolve = (m == ViewMode.ResolveOnly);
-
         if (rightHudGaugeButtons != null)
         {
             for (int i = 0; i < rightHudGaugeButtons.Length; i++)
@@ -347,18 +534,15 @@ public sealed class RoundFlowUI : MonoBehaviour
                 var b = rightHudGaugeButtons[i];
                 if (b == null) continue;
 
-                // Buttonの見た目は一切いじらない。Raycastだけ切る。
-                var g = b.targetGraphic;
-                if (g != null) g.raycastTarget = !resolve;
-
-                // 保険：子のGraphicがRaycastを取る構成なら、まとめて切る
-                var graphics = b.GetComponentsInChildren<UnityEngine.UI.Graphic>(true);
+                var graphics = b.GetComponentsInChildren<Graphic>(true);
                 for (int j = 0; j < graphics.Length; j++)
                     graphics[j].raycastTarget = !resolve;
             }
         }
 
-
+        ApplyHudViewMode();
+        RefreshProceedInteractable();
+        RefreshBottomHintText();
 
         if (debugLog)
         {
@@ -366,10 +550,6 @@ public sealed class RoundFlowUI : MonoBehaviour
                 $"resolve={(resolveRoot ? resolveRoot.activeSelf : false)} " +
                 $"adjust={(adjustPanel ? adjustPanel.activeSelf : false)}");
         }
-
-        ApplyHudViewMode();
-        RefreshProceedInteractable();
-        RefreshBottomHintText();
     }
 
     private void ForceParentsOn()
@@ -382,7 +562,14 @@ public sealed class RoundFlowUI : MonoBehaviour
     {
         if (bottomPanelButton == null) return;
 
-        // Resolveは常に進める（スキップ or 次へ）
+        // チュートリアル中は原則 false（ApplyTutorialGatesが管理）
+        if (tutorial != null && tutorial.IsOpen)
+        {
+            bottomPanelButton.interactable = false;
+            return;
+        }
+
+        // Resolveは常に進める
         if (_viewMode == ViewMode.ResolveOnly)
         {
             bottomPanelButton.interactable = true;
@@ -390,8 +577,7 @@ public sealed class RoundFlowUI : MonoBehaviour
         }
 
         // AdjustはdraftがOKなら進める
-        bottomPanelButton.interactable =
-            (adjustView == null) || adjustView.CanProceedToNextRound();
+        bottomPanelButton.interactable = (adjustView == null) || adjustView.CanProceedToNextRound();
     }
 
     private void OnDestroy()
@@ -400,7 +586,10 @@ public sealed class RoundFlowUI : MonoBehaviour
             adjustView.OnDraftChanged -= HandleAdjustChanged;
 
         if (tutorial != null)
-                tutorial.OnStepChanged -= HandleTutorialStepChanged;
+        {
+            tutorial.OnStepChanged -= HandleTutorialStepChanged;
+            tutorial.OnFinished -= HandleTutorialFinished;
+        }
     }
 
     private void RefreshResolveRightWindow()
@@ -417,66 +606,29 @@ public sealed class RoundFlowUI : MonoBehaviour
             resolvePointsText.text = $"x{run.Points}";
     }
 
-    private void ToggleHudDetail()
-    {
-        _hudDetail = !_hudDetail;
-
-        ApplyHudViewMode();
-        RefreshDetailHint();
-
-        if (presenter != null)
-            presenter.RefreshHud();
-
-        // ★チュートリアル：左ウィンドウを開けたら次へ（Element16）
-        if (tutorial != null && tutorial.IsCurrentStep(TutorialOverlayView.StepId.EnemyInfo))
-            {
-                // 「確認してみましょう」なので、開いた瞬間に進めるのが自然
-                // （閉じた時に進むのは変なので、開いた時だけ）
-                if (_hudDetail)
-                    tutorial.NotifyExternalAction();
-            }
-
-        // ★LayoutRebuildではなく「高さフィット」を呼ぶ
-        StartCoroutine(RefitLeftWindowHeightNextFrame());
-    }
-
-
-
     private void ApplyHudViewMode()
     {
         if (hud == null) return;
         hud.SetViewMode(_hudDetail ? GameHudView.HudViewMode.Detail : GameHudView.HudViewMode.Compact);
     }
 
-    private System.Collections.IEnumerator RefitLeftWindowHeightNextFrame()
-    {
-        yield return null; // TMPのpreferred更新待ち
-
-        if (leftWindowRect == null || enemyInfoText == null) yield break;
-
-        // preferredHeightを確実に更新
-        enemyInfoText.ForceMeshUpdate();
-
-        float h = enemyInfoText.preferredHeight + leftWindowPaddingY;
-        if (h < leftWindowMinHeight) h = leftWindowMinHeight;
-
-        leftWindowRect.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, h);
-    }
 
     private IEnumerator FitLeftWindowNextFrame()
     {
-        // 1回目：テキスト更新直後の確定待ち
-        yield return null;
+        // 多重起動の競合を避けたい場合は、呼び出し側で Stop する（後述）
+        yield return null; // 1回目：TMP更新待ち
         FitLeftWindowOnce();
 
-        // 2回目：TMP/レイアウトが1フレ遅れて反映されるケースの保険
-        yield return null;
+        yield return null; // 2回目：レイアウト遅延保険
         FitLeftWindowOnce();
     }
 
     private void FitLeftWindowOnce()
     {
         if (leftWindowRect == null || enemyInfoText == null) return;
+
+        // TMP更新
+        enemyInfoText.ForceMeshUpdate();
 
         float w = leftWindowRect.rect.width;
         if (w <= 1f) return;
@@ -492,58 +644,29 @@ public sealed class RoundFlowUI : MonoBehaviour
         leftWindowRect.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, h);
     }
 
+
+
+
+    private void RequestFitLeftWindow()
+    {
+        if (_fitLeftWindowCo != null)
+            StopCoroutine(_fitLeftWindowCo);
+        _fitLeftWindowCo = StartCoroutine(FitLeftWindowNextFrame());
+    }
+
+
     private void RefreshDetailHint()
     {
         if (detailHintText == null) return;
+
+        if (!detailHintText.gameObject.activeSelf)
+            detailHintText.gameObject.SetActive(true);
+
         detailHintText.text = _hudDetail ? hintCloseDetail : hintShowDetail;
+        detailHintText.ForceMeshUpdate();
     }
 
-    private void HandleTutorialFinished()
-    {
-        // ★チュートリアルで触った「予約ドラフト」だけ消す
-        if (adjustView != null)
-            adjustView.ClearDraftForcedOrder();
 
-        // 右の予約スロット表示も即更新
-        if (reservedSlotsView != null && adjustView != null)
-            reservedSlotsView.Render(adjustView.GetDraftForcedOrder());
-
-        // HUDも更新
-        if (presenter != null)
-            presenter.RefreshHud();
-    }
-
-    private void HandleTutorialStepChanged(TutorialOverlayView.Step step)
-    {
-        SyncTutorialState();
-
-        if (_tutorialResetDone) return;
-        if (step == null) return;
-
-        // ★本命：このStepIdに到達した瞬間に戻す（あなたの実際のIDに合わせる）
-        bool isStartGiftStep = (step.id == TutorialOverlayView.StepId.StartGift);
-
-        // ★保険：ID付け間違い/ズレでも文言で拾う（「10コイン」「始めましょう」）
-        bool looksLikeStartGiftText =
-            !string.IsNullOrEmpty(step.text) &&
-            (step.text.Contains("10コイン") || step.text.Contains("プレゼント") || step.text.Contains("始めましょう"));
-
-        if (!isStartGiftStep && !looksLikeStartGiftText) return;
-
-        _tutorialResetDone = true;
-
-        if (adjustView != null)
-            adjustView.ResetTutorialGaugeAndReservation();
-
-        if (reservedSlotsView != null && adjustView != null)
-            reservedSlotsView.Render(adjustView.GetDraftForcedOrder());
-
-
-        RefreshBottomHintText();
-
-        if (debugLog)
-            Log("[Tutorial] Reset gaugeBuy + forcedOrder at StartGift/Start text step");
-    }
 
     private void RefreshBottomHintText()
     {
@@ -557,22 +680,73 @@ public sealed class RoundFlowUI : MonoBehaviour
 
     private void SyncTutorialState()
     {
-        RefreshBottomHintText(); // ついでに下パネルも同期（既存関数流用）
+        RefreshBottomHintText();
     }
 
 
+    private void HandleTutorialFinished()
+    {
+        // チュートリアル終了直後は、まずドラフトの残骸を消す（安全側）
+        if (adjustView != null)
+            adjustView.ResetTutorialGaugeAndReservation();
+
+        if (reservedSlotsView != null && adjustView != null)
+            reservedSlotsView.Render(adjustView.GetDraftForcedOrder());
 
 
+        // ★重要：tutorial.IsOpen==false になった後の入力ゲートを通常に戻す
+        ApplyTutorialGates();            // ←これ追加（not tut 分岐で raycastTarget が復活する）
+        RefreshProceedInteractable();    // ←保険
+        // RoundLog はチュートリアル中ずっと空だったはずなので、ここから演出してOK
+        StartCoroutine(TutorialExitToAdjustFlow());
+    }
+
+    private IEnumerator TutorialExitToAdjustFlow()
+    {
+        // 1) 準備中…（HUD_RoundLog側に出す）
+        if (presenter != null)
+        {
+            presenter.SetRoundLog("準備中…");
+            presenter.RefreshHud();
+        }
+
+        // 2) 0.3秒だけProceed無効（連打で戦闘突入を防ぐ）
+        if (bottomPanelButton != null) bottomPanelButton.interactable = false;
+        yield return new WaitForSecondsRealtime(0.3f);
+
+        // 3) 調整を促すログを出して、Adjustを開く
+        if (presenter != null)
+        {
+            presenter.SetRoundLog("デッキを調整してください");
+            presenter.RefreshHud();
+        }
+
+        // ★Adjustを開く（RightWindow_Adjustを出す）
+        OpenAdjust();
+
+        // OpenAdjust後に通常の可否へ戻す
+        RefreshProceedInteractable();
+    }
 
 
+    // -------------------------
+    // Utility: Raycast gating
+    // -------------------------
 
+    private static void SetButtonRaycast(Button b, bool enabled)
+    {
+        if (b == null) return;
 
+        b.interactable = enabled;
 
+        var graphics = b.GetComponentsInChildren<Graphic>(true);
+        for (int i = 0; i < graphics.Length; i++)
+            graphics[i].raycastTarget = enabled;
+    }
 
-
-
-
-
+    // -------------------------
+    // Logs
+    // -------------------------
 
     private void Log(string msg) => Debug.Log($"[RoundFlowUI] {msg}");
     private void LogWarn(string msg) => Debug.LogWarning($"[RoundFlowUI] {msg}");

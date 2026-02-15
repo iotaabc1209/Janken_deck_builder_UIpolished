@@ -615,5 +615,294 @@ namespace RpsBuild.Core
             );
         }
 
+        // Assets/Scripts/Core/RpsCore.cs
+        // RoundSimulator class 内に追加
+
+        public struct BalanceMove
+        {
+            public RpsColor toColor;          // forced色（置換後）
+            public int index;                 // 置換した手番（0-based）
+            public RpsColor fromColor;        // 置換前
+            public RpsOutcome outcomeAfter;   // 最終結果のその手番の勝敗
+            public bool createdMissing;       // 最終的に欠損が増えたか（便宜上moveにも付与）
+        }
+
+        // =========================
+        // Assets/Scripts/Core/RpsCore.cs
+        // RoundSimulator.ApplyBalance_ChargedGaugeReplaceMultiHands_FullSearch を置き換え
+        // （他は触らない）
+        // =========================
+
+        public static RoundResult ApplyBalance_ChargedGaugeReplaceMultiHands_FullSearch(
+                    RoundResult rr,
+                    int loseThresholdExclusive,
+                    DeckProfile playerProfile,
+                    System.Collections.Generic.IReadOnlyList<RpsColor> forcedColors,
+                    out bool anyApplied,
+                    out bool anyCreatedMissing,
+                    System.Collections.Generic.List<BalanceMove> outMoves,
+                    out int usedGu,
+                    out int usedChoki,
+                    out int usedPa)
+            {
+                    anyApplied = false;
+                    anyCreatedMissing = false;
+                    usedGu = 0;
+                    usedChoki = 0;
+                    usedPa = 0;
+
+                    if (outMoves != null) outMoves.Clear();
+
+                    if (rr == null) return rr;
+                    if (forcedColors == null || forcedColors.Count <= 0) return rr;
+                    if (rr.PlayerHands == null || rr.EnemyHands == null || rr.Outcomes == null) return rr;
+
+                    int handCount = rr.HandCount;
+                    if (handCount <= 0) return rr;
+
+                    // --------- helpers ---------
+
+                    int CountMissing(List<RpsColor> hands)
+                    {
+                        var seen = new HashSet<RpsColor>();
+                        int n = hands.Count;
+                        if (n > handCount) n = handCount;
+                        for (int i = 0; i < n; i++) seen.Add(hands[i]);
+
+                        int missing = 0;
+                        foreach (var c in new[] { RpsColor.Gu, RpsColor.Choki, RpsColor.Pa })
+                        {
+                            if (playerProfile.Has(c) && !seen.Contains(c))
+                                missing++;
+                        }
+                        return missing;
+                    }
+
+                    int CalcLosses(List<RpsColor> hands)
+                    {
+                        int losses = 0;
+                        int n = hands.Count;
+                        if (n > handCount) n = handCount;
+                        if (rr.EnemyHands.Count < n) n = rr.EnemyHands.Count;
+
+                        for (int i = 0; i < n; i++)
+                        {
+                            if (Judge(hands[i], rr.EnemyHands[i]) == RpsOutcome.Lose)
+                                losses++;
+                        }
+                        return losses;
+                    }
+
+                    int StageFrom(bool clear, int missingCount)
+                    {
+                        // 0:敗北, 1:0種, 2:1種, 3:2種(以上)
+                        if (!clear) return 0;
+                        if (missingCount >= 2) return 3;
+                        if (missingCount == 1) return 2;
+                        return 1;
+                    }
+
+                    // --------- base ---------
+
+                    var baseHands = rr.PlayerHands;
+                    int baseLosses = rr.LossCount;
+                    int baseMissingCount = (rr.MissingColors != null) ? rr.MissingColors.Count : CountMissing(baseHands);
+                    bool baseClear = baseLosses < loseThresholdExclusive;
+                    int baseStage = StageFrom(baseClear, baseMissingCount);
+
+                    // forcedColors から残数を作る（任意順探索）
+                    int remainGu = 0, remainCh = 0, remainPa2 = 0;
+                    for (int i = 0; i < forcedColors.Count; i++)
+                    {
+                        switch (forcedColors[i])
+                        {
+                            case RpsColor.Gu: remainGu++; break;
+                            case RpsColor.Choki: remainCh++; break;
+                            case RpsColor.Pa: remainPa2++; break;
+                        }
+                    }
+
+                    // work
+                    var workHands = new List<RpsColor>(rr.PlayerHands);
+
+                    // 探索中の手
+                    var choiceTo = new List<RpsColor>(forcedColors.Count);
+                    var choiceIdx = new List<int>(forcedColors.Count);
+                    var choiceFrom = new List<RpsColor>(forcedColors.Count);
+
+                    // best
+                    List<RpsColor> bestHands = null;
+                    int bestStage = baseStage;
+                    int bestChanges = int.MaxValue;
+                    int bestLosses = int.MaxValue;
+
+                    List<RpsColor> bestTo = null;
+                    List<int> bestIdx = null;
+                    List<RpsColor> bestFrom = null;
+                    int bestUsedGu = 0, bestUsedCh = 0, bestUsedPa = 0;
+
+                    void EvaluateCurrent()
+                    {
+                        // 最終 outcomes/losses/missing だけで評価
+                        int losses2 = CalcLosses(workHands);
+                        bool clear2 = losses2 < loseThresholdExclusive;
+                        int missingCount2 = CountMissing(workHands);
+                        int stage2 = StageFrom(clear2, missingCount2);
+
+                        // ★段階が上がらないなら「介入しない」（ゲージ返却）を優先＝候補にしない
+                        if (stage2 <= baseStage) return;
+
+                        int changes2 = choiceIdx.Count;
+
+                        // 同stageなら介入回数が少ない方（工数最小＆ログ簡潔）
+                        bool better = false;
+                        if (bestHands == null) better = true;
+                        else if (stage2 != bestStage) better = (stage2 > bestStage);
+                        else if (changes2 != bestChanges) better = (changes2 < bestChanges);
+                        else if (losses2 != bestLosses) better = (losses2 < bestLosses);
+
+                        if (!better) return;
+
+                        bestHands = new List<RpsColor>(workHands);
+                        bestStage = stage2;
+                        bestChanges = changes2;
+                        bestLosses = losses2;
+
+                        bestTo = new List<RpsColor>(choiceTo);
+                        bestIdx = new List<int>(choiceIdx);
+                        bestFrom = new List<RpsColor>(choiceFrom);
+
+                        // usedCounts を更新
+                        bestUsedGu = 0; bestUsedCh = 0; bestUsedPa = 0;
+                        for (int i = 0; i < bestTo.Count; i++)
+                        {
+                            switch (bestTo[i])
+                            {
+                                case RpsColor.Gu: bestUsedGu++; break;
+                                case RpsColor.Choki: bestUsedCh++; break;
+                                case RpsColor.Pa: bestUsedPa++; break;
+                            }
+                        }
+                    }
+
+                    void Dfs(int rGu, int rCh, int rPa)
+                    {
+                        // いつでも「ここで止める」評価をする（＝残りは返却）
+                        EvaluateCurrent();
+
+                        // もう残りが無いなら終了
+                        if (rGu <= 0 && rCh <= 0 && rPa <= 0) return;
+
+                        // 次に使う色を選ぶ（任意順）
+                        void TryColor(RpsColor target, ref int rem)
+                        {
+                            if (rem <= 0) return;
+                            rem--;
+
+                            // 置換先 index を選ぶ
+                            for (int i = 0; i < handCount && i < workHands.Count; i++)
+                            {
+                                if (workHands[i] == target) continue;
+
+                                var old = workHands[i];
+                                workHands[i] = target;
+
+                                choiceTo.Add(target);
+                                choiceIdx.Add(i);
+                                choiceFrom.Add(old);
+
+                                Dfs(rGu, rCh, rPa);
+
+                                // 戻す
+                                choiceTo.RemoveAt(choiceTo.Count - 1);
+                                choiceIdx.RemoveAt(choiceIdx.Count - 1);
+                                choiceFrom.RemoveAt(choiceFrom.Count - 1);
+
+                                workHands[i] = old;
+                            }
+
+                            rem++;
+                        }
+
+                        // 順番は固定でOK（任意順探索なので全分岐は網羅される）
+                        TryColor(RpsColor.Gu, ref rGu);
+                        TryColor(RpsColor.Choki, ref rCh);
+                        TryColor(RpsColor.Pa, ref rPa);
+                    }
+
+                    Dfs(remainGu, remainCh, remainPa2);
+
+                    // ★段階が上がる最善が無いなら介入なし
+                    if (bestHands == null || bestTo == null) return rr;
+
+                    // bestHands で最終RoundResult構築
+                    var finalOutcomes = new List<RpsOutcome>(handCount);
+                    int finalLosses = 0;
+                    var finalSeen = new HashSet<RpsColor>();
+
+                    int n2 = handCount;
+                    if (rr.EnemyHands.Count < n2) n2 = rr.EnemyHands.Count;
+                    if (bestHands.Count < n2) n2 = bestHands.Count;
+
+                    for (int i = 0; i < n2; i++)
+                    {
+                        finalSeen.Add(bestHands[i]);
+                        var o = Judge(bestHands[i], rr.EnemyHands[i]);
+                        finalOutcomes.Add(o);
+                        if (o == RpsOutcome.Lose) finalLosses++;
+                    }
+
+                    bool finalClear = finalLosses < loseThresholdExclusive;
+
+                    var finalMissing = new List<RpsColor>(3);
+                    foreach (var c in new[] { RpsColor.Gu, RpsColor.Choki, RpsColor.Pa })
+                    {
+                        if (playerProfile.Has(c) && !finalSeen.Contains(c))
+                            finalMissing.Add(c);
+                    }
+
+                    // createdMissing（“欠損勝利が新規に発生した”寄せ）
+                    int finalMissingCount = finalMissing.Count;
+                    anyCreatedMissing = (finalClear && finalMissingCount > 0 && !(baseClear && baseMissingCount > 0));
+
+                    anyApplied = true;
+
+                    usedGu = bestUsedGu;
+                    usedChoki = bestUsedCh;
+                    usedPa = bestUsedPa;
+
+                    // outMoves（選んだ順）
+                    if (outMoves != null)
+                    {
+                        outMoves.Clear();
+                        for (int s = 0; s < bestTo.Count; s++)
+                        {
+                            int idx = bestIdx[s];
+                            var mv = new BalanceMove
+                            {
+                                toColor = bestTo[s],
+                                index = idx,
+                                fromColor = bestFrom[s],
+                                outcomeAfter = (idx >= 0 && idx < finalOutcomes.Count) ? finalOutcomes[idx] : RpsOutcome.Tie,
+                                createdMissing = anyCreatedMissing
+                            };
+                            outMoves.Add(mv);
+                        }
+                    }
+
+                    return new RoundResult(
+                        handCount,
+                        bestHands,
+                        rr.EnemyHands,
+                        finalOutcomes,
+                        finalLosses,
+                        finalClear,
+                        finalMissing
+                    );
+            }
+
+
+
+
     }
 }

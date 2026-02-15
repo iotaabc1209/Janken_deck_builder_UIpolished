@@ -365,71 +365,96 @@ public sealed class RunPresenter : MonoBehaviour
 
 
 
-    private string BuildBonusLogJa(RoundResult rr)
-    {
-        if (_run == null || rr == null) return "";
+    // =========================
+    // Assets/Scripts/Unity/RunPresenter.cs
+    // BuildBonusLogJa に「返却ログ」を追加（Balanceが不発でも表示できる）
+    // =========================
 
-        var sb = new System.Text.StringBuilder();
-
-        if (_run.LastHeavyBonusApplied)
-        {
-            sb.Append('\n');
-            sb.Append($"偏重ボーナス：一度だけ{ToJpColor(_run.LastHeavyBonusPlayerColor)}での負けが勝ちになりました");
-        }
-
-        if (_run.LastTwinTopBonusWinCount > 0)
-        {
-            sb.Append('\n');
-            sb.Append($"２トップボーナス：３連で交互に出せた時の負けが{_run.LastTwinTopBonusWinCount}回勝ちになりました");
-        }
-
-        // ---- Balance ----
-        if (_run.LastBalanceBonusApplied)
-        {
-            // 1) タイトル行（必ず一番上）
-            sb.Append('\n');
-            sb.Append("バランスボーナス：確定ドローにより引き直しを行いました");
-
-            // 2) 確定ドロー詳細（1行に圧縮）
-            if (_run.LastBalanceMoves != null && _run.LastBalanceMoves.Count > 0)
+            private string BuildBonusLogJa(RoundResult rr)
             {
-                sb.Append('\n');
+                if (_run == null || rr == null) return "";
 
-                for (int i = 0; i < _run.LastBalanceMoves.Count; i++)
+                var sb = new System.Text.StringBuilder();
+
+                if (_run.LastHeavyBonusApplied)
                 {
-                    var m = _run.LastBalanceMoves[i];
-                    int handNo1 = m.index + 1; // 表示は1-based
-
-                    if (i > 0) sb.Append("　"); // 全角スペース区切り
-
-                    string outcomeJa = m.outcome switch
-                    {
-                        RpsOutcome.Win => "勝ち",
-                        RpsOutcome.Tie => "引き分け",
-                        _ => "負け"
-                    };
-
-                    sb.Append($"({i + 1}){handNo1}手目 ");
-                    sb.Append($"{ToJpColor(m.fromColor)}→{ToJpColor(m.toColor)}（{outcomeJa}）");
+                    sb.Append('\n');
+                    sb.Append($"偏重ボーナス：一度だけ{ToJpColor(_run.LastHeavyBonusPlayerColor)}での負けが勝ちになりました");
                 }
+
+                if (_run.LastTwinTopBonusWinCount > 0)
+                {
+                    sb.Append('\n');
+                    sb.Append($"２トップボーナス：３連で交互に出せた時の負けが{_run.LastTwinTopBonusWinCount}回勝ちになりました");
+                }
+
+                // ---- Balance ----
+                bool hasRefund =
+                    (_run.LastBalanceRefundGu > 0) ||
+                    (_run.LastBalanceRefundChoki > 0) ||
+                    (_run.LastBalanceRefundPa > 0);
+
+                if (_run.LastBalanceBonusApplied)
+                {
+                    sb.Append('\n');
+                    sb.Append("バランスボーナス：確定ドローにより引き直しを行いました");
+
+                    if (_run.LastBalanceMoves != null && _run.LastBalanceMoves.Count > 0)
+                    {
+                        sb.Append('\n');
+
+                        for (int i = 0; i < _run.LastBalanceMoves.Count; i++)
+                        {
+                            var m = _run.LastBalanceMoves[i];
+                            int handNo1 = m.index + 1;
+
+                            if (i > 0) sb.Append("　");
+
+                            string outcomeJa = m.outcome switch
+                            {
+                                RpsOutcome.Win => "勝ち",
+                                RpsOutcome.Tie => "引き分け",
+                                _ => "負け"
+                            };
+
+                            sb.Append($"({i + 1}){handNo1}手目 ");
+                            sb.Append($"{ToJpColor(m.fromColor)}→{ToJpColor(m.toColor)}（{outcomeJa}）");
+                        }
+                    }
+
+                    if (hasRefund)
+                    {
+                        sb.Append('\n');
+                        sb.Append(BuildBalanceRefundLineJa());
+                    }
+
+                    if (rr.IsClear && rr.MissingColors != null && rr.MissingColors.Count > 0 && _run.LastBalanceBonusCreatedMissing)
+                    {
+                        sb.Append('\n');
+                        sb.Append("これにより欠損勝利が発生し、ゲージが溜まりました。");
+                    }
+                }
+                else if (hasRefund)
+                {
+                    // ★介入不発でも返却ログは出す
+                    sb.Append('\n');
+                    sb.Append(BuildBalanceRefundLineJa());
+                }
+
+                return sb.ToString();
             }
 
-            // 3) 欠損勝利（短文・1回だけ）
-            // createdMissing は “その介入で欠損勝利を作った” の意味に寄せてるが、
-            // 表示は「欠損勝利が実際に発生した」かでガードする（見た目の嘘を減らす）
-            if (rr.IsClear && rr.MissingColors != null && rr.MissingColors.Count > 0 && _run.LastBalanceBonusCreatedMissing)
+            private string BuildBalanceRefundLineJa()
             {
-                sb.Append('\n');
-                sb.Append("これにより欠損勝利が発生し、ゲージが溜まりました。");
+                // 「使わなかったゲージ（グーx2, パーx1）は返却されました」
+                var parts = new System.Collections.Generic.List<string>(3);
+
+                if (_run.LastBalanceRefundGu > 0) parts.Add($"グーx{_run.LastBalanceRefundGu}");
+                if (_run.LastBalanceRefundChoki > 0) parts.Add($"チョキx{_run.LastBalanceRefundChoki}");
+                if (_run.LastBalanceRefundPa > 0) parts.Add($"パーx{_run.LastBalanceRefundPa}");
+
+                string mid = string.Join(", ", parts);
+                return $"使わなかったゲージ（{mid}）は返却されました";
             }
-        }
 
-
-
-
-
-
-
-        return sb.ToString();
-    }
 }

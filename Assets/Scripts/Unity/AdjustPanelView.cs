@@ -98,13 +98,13 @@ public sealed class AdjustPanelView : MonoBehaviour
         bool okTotal = (shown.Total == 30);   // ★これを追加
 
         // ---- counts ----
-        if (countGuText != null)    countGuText.text = shown.Gu.ToString();
-        if (countChokiText != null) countChokiText.text = shown.Choki.ToString();
-        if (countPaText != null)    countPaText.text = shown.Pa.ToString();
+        if (countGuText != null)    countGuText.text = $"{shown.Gu}枚";
+        if (countChokiText != null) countChokiText.text = $"{shown.Choki}枚";
+        if (countPaText != null)    countPaText.text = $"{shown.Pa}枚";
 
         var col = okTotal
             ? new Color32(0x10, 0x21, 0x2F, 0xFF)   // #10212F（通常）
-            : new Color32(0xFF, 0x99, 0x99, 0xFF); // エラー
+            : new Color32(0xE3, 0x58, 0x58, 0xFF); // エラー
 
 
 
@@ -119,7 +119,7 @@ public sealed class AdjustPanelView : MonoBehaviour
 
             if (!okTotal)
             {
-                playerArchetypeText.text = "自分：—（合計30で確定）";
+                playerArchetypeText.text = "自分：—（合計30枚で確定）";
             }
             else
             {
@@ -154,9 +154,9 @@ public sealed class AdjustPanelView : MonoBehaviour
 
         bool canGaugeAdd = CanGaugeAdd(run);
 
-        if (buyGaugePlusGu != null)    buyGaugePlusGu.interactable    = canGaugeAdd && CanGaugeActuallyIncrease(RpsColor.Gu, run);
-        if (buyGaugePlusChoki != null) buyGaugePlusChoki.interactable = canGaugeAdd && CanGaugeActuallyIncrease(RpsColor.Choki, run);
-        if (buyGaugePlusPa != null)    buyGaugePlusPa.interactable    = canGaugeAdd && CanGaugeActuallyIncrease(RpsColor.Pa, run);
+        if (buyGaugePlusGu != null)    buyGaugePlusGu.interactable    = canGaugeAdd;
+        if (buyGaugePlusChoki != null) buyGaugePlusChoki.interactable = canGaugeAdd;
+        if (buyGaugePlusPa != null)    buyGaugePlusPa.interactable    = canGaugeAdd;
 
         if (buyGaugeMinusGu != null)    buyGaugeMinusGu.interactable    = CanGaugeActuallyDecrease(RpsColor.Gu);
         if (buyGaugeMinusChoki != null) buyGaugeMinusChoki.interactable = CanGaugeActuallyDecrease(RpsColor.Choki);
@@ -371,7 +371,6 @@ public sealed class AdjustPanelView : MonoBehaviour
         var run = presenter.Run;
 
         if (!CanGaugeAdd(run)) return;
-        if (!CanGaugeActuallyIncrease(c, run)) return;
 
         _gaugeBuy[(int)c] += 1;
         TouchDraft();
@@ -570,13 +569,6 @@ public sealed class AdjustPanelView : MonoBehaviour
 
         if (gaugeBarView != null)
             gaugeBarView.SetGauge(gu, ch, pa, run.Gauge.Max);
-    }
-
-    private bool CanGaugeActuallyIncrease(RpsColor c, RunState run)
-    {
-        float v = GetShownGaugeValue_NoClamp(c, run);
-        float rem = v - Mathf.Floor(v / run.Gauge.Max) * run.Gauge.Max;
-        return rem < run.Gauge.Max - 1e-6f;
     }
 
     private bool CanGaugeActuallyDecrease(RpsColor c)

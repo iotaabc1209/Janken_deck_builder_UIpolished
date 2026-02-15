@@ -97,6 +97,12 @@ namespace RpsBuild.Core
         public readonly List<(RpsColor color, int index)> LastForcedPlacements = new();
         public readonly List<(RpsColor toColor, int index, RpsColor fromColor, RpsOutcome outcome, bool createdMissing)> LastBalanceMoves
             = new();
+        private readonly List<int> _lastBalanceBonusIndices = new();
+        public IReadOnlyList<int> LastBalanceBonusIndices => _lastBalanceBonusIndices;
+        public int LastBalanceRefundGu { get; private set; } = 0;
+        public int LastBalanceRefundChoki { get; private set; } = 0;
+        public int LastBalanceRefundPa { get; private set; } = 0;
+
 
 
 
@@ -234,6 +240,11 @@ namespace RpsBuild.Core
             LastBalanceBonusApplied = false;
             LastBalanceBonusIndex = -1;
             LastBalanceBonusCreatedMissing = false;
+            if (_lastBalanceBonusIndices != null) _lastBalanceBonusIndices.Clear();
+            LastBalanceRefundGu = 0;
+            LastBalanceRefundChoki = 0;
+            LastBalanceRefundPa = 0;
+
 
             if (!isIntro)
             {
@@ -253,62 +264,94 @@ namespace RpsBuild.Core
                 // ★確定ドローが2回なら介入も2回（最小差分：既存の置換関数を複数回回す）
                 LastBalanceMoves.Clear();
 
-                if (PlayerArchetype == PlayerArchetype.Balance && forced != null && forced.Count > 0)
-                {
-                    bool anyApplied = false;
-                    bool anyCreatedMissing = false;
-
-                    // 置換は「確定ドローを消費できた回数ぶん」行う
-                    for (int fi = 0; fi < forced.Count; fi++)
+                    if (PlayerArchetype == PlayerArchetype.Balance && forced != null && forced.Count > 0)
                     {
-                        var gaugeColor = forced[fi];
+                                // 消費した（=forcedに入った）回数を色別に集計
+                                int consumedGu = 0, consumedCh = 0, consumedPa = 0;
+                                for (int i = 0; i < forced.Count; i++)
+                                {
+                                        switch (forced[i])
+                                        {
+                                            case RpsColor.Gu: consumedGu++; break;
+                                            case RpsColor.Choki: consumedCh++; break;
+                                            case RpsColor.Pa: consumedPa++; break;
+                                        }
+                                }
 
-                        var before = result;
-                        result = RoundSimulator.ApplyBalance_ChargedGaugeReplaceOneHand(
-                            result,
-                            _tuning.LoseThresholdExclusive,
-                            PlayerProfile,
-                            gaugeColor,
-                            out var applied,
-                            out var idx,
-                            out var from,
-                            out var to,
-                            out var at,
-                            out var createdMissing
-                        );
+                                    var tmpMoves = new System.Collections.Generic.List<RoundSimulator.BalanceMove>(forced.Count);
 
-                        // 置換が起きた時だけ記録（idx=-1 の “0手目グー→グー” 残骸を殺す）
-                        if (applied && !ReferenceEquals(result, before) && idx >= 0)
-                        {
-                            anyApplied = true;
-                            anyCreatedMissing |= createdMissing;
+                                    var before = result;
+                                    result = RoundSimulator.ApplyBalance_ChargedGaugeReplaceMultiHands_FullSearch(
+                                        result,
+                                        _tuning.LoseThresholdExclusive,
+                                        PlayerProfile,
+                                        forced,
+                                        out var anyApplied,
+                                        out var anyCreatedMissing,
+                                        tmpMoves,
+                                        out int usedGu,
+                                        out int usedCh,
+                                        out int usedPa
+                                    );
 
-                            LastBalanceMoves.Add((to, idx, from, at, createdMissing));
+                                    // ★段階が上がらない場合：ApplyBalance が rr を返す（anyApplied=false想定）
+                                    //    ただし保険で「ReferenceEquals」も見る
+                                    bool changed = (!ReferenceEquals(result, before));
 
-                            // 互換：既存の LastBalance〜 は「最後に起きたもの」で更新
-                            LastBalanceBonusIndex = idx;
-                            LastBalanceBonusFrom = from;
-                            LastBalanceBonusTo = to;
-                            LastBalanceBonusResult = at;
-                        }
+                                    if (anyApplied && changed && tmpMoves.Count > 0)
+                                    {
+                                        LastBalanceBonusApplied = true;
+                                        LastBalanceBonusCreatedMissing = anyCreatedMissing;
+
+                                        for (int i = 0; i < tmpMoves.Count; i++)
+                                        {
+                                            var m = tmpMoves[i];
+                                            LastBalanceMoves.Add((m.toColor, m.index, m.fromColor, m.outcomeAfter, m.createdMissing));
+
+                                            // 互換：最後に起きたもの
+                                            LastBalanceBonusIndex = m.index;
+                                            LastBalanceBonusFrom = m.fromColor;
+                                            LastBalanceBonusTo = m.toColor;
+                                            LastBalanceBonusResult = m.outcomeAfter;
+                                        }
+
+                                        // 最終結果で outcome を上書き（既存踏襲）
+                                        if (LastBalanceBonusIndex >= 0 && LastBalanceBonusIndex < result.Outcomes.Count)
+                                            LastBalanceBonusResult = result.Outcomes[LastBalanceBonusIndex];
+
+                                        for (int i = 0; i < LastBalanceMoves.Count; i++)
+                                        {
+                                            var m = LastBalanceMoves[i];
+                                            if (m.index >= 0 && m.index < result.Outcomes.Count)
+                                                LastBalanceMoves[i] = (m.toColor, m.index, m.fromColor, result.Outcomes[m.index], m.createdMissing);
+                                        }
+
+                                        // ★使わなかった分を返却（工数最小：後からGauge.Add）
+                                        int refundGu = Mathf.Max(0, consumedGu - usedGu);
+                                        int refundCh = Mathf.Max(0, consumedCh - usedCh);
+                                        int refundPa2 = Mathf.Max(0, consumedPa - usedPa);
+
+                                        if (refundGu > 0) Gauge.Add(RpsColor.Gu, _tuning.GaugeMax * refundGu);
+                                        if (refundCh > 0) Gauge.Add(RpsColor.Choki, _tuning.GaugeMax * refundCh);
+                                        if (refundPa2 > 0) Gauge.Add(RpsColor.Pa, _tuning.GaugeMax * refundPa2);
+
+                                        LastBalanceRefundGu = refundGu;
+                                        LastBalanceRefundChoki = refundCh;
+                                        LastBalanceRefundPa = refundPa2;
                     }
-
-                    LastBalanceBonusApplied = anyApplied;
-                    LastBalanceBonusCreatedMissing = anyCreatedMissing;
-
-                    // ★最後に：ログの「勝ち/引き分け」を最終結果に合わせて更新
-                    if (LastBalanceBonusApplied && LastBalanceBonusIndex >= 0 && LastBalanceBonusIndex < result.Outcomes.Count)
-                        LastBalanceBonusResult = result.Outcomes[LastBalanceBonusIndex];
-
-                    // moves の outcome も最終結果で上書き（※同じidxが複数回触られる可能性に備える）
-                    if (LastBalanceMoves.Count > 0)
+                    else
                     {
-                        for (int i = 0; i < LastBalanceMoves.Count; i++)
-                        {
-                            var m = LastBalanceMoves[i];
-                            if (m.index >= 0 && m.index < result.Outcomes.Count)
-                                LastBalanceMoves[i] = (m.toColor, m.index, m.fromColor, result.Outcomes[m.index], m.createdMissing);
-                        }
+                                        // ★段階が上がらない：介入しない。消費済みは全返却
+                        LastBalanceBonusApplied = false;
+                        LastBalanceBonusCreatedMissing = false;
+
+                        if (consumedGu > 0) Gauge.Add(RpsColor.Gu, _tuning.GaugeMax * consumedGu);
+                        if (consumedCh > 0) Gauge.Add(RpsColor.Choki, _tuning.GaugeMax * consumedCh);
+                        if (consumedPa > 0) Gauge.Add(RpsColor.Pa, _tuning.GaugeMax * consumedPa);
+
+                        LastBalanceRefundGu = consumedGu;
+                        LastBalanceRefundChoki = consumedCh;
+                        LastBalanceRefundPa = consumedPa;
                     }
                 }
 
@@ -734,11 +777,6 @@ namespace RpsBuild.Core
                 PlayerMainColor   = info.MainColor;
                 PlayerSecondColor = info.SecondColor;
             }
-
-
-
-
-
 
     }
 }
