@@ -164,8 +164,14 @@ public sealed class RunPresenter : MonoBehaviour
             if (_run.LastTwinTopBonusIndices != null && _run.LastTwinTopBonusIndices.Count > 0)
                 hi.AddRange(_run.LastTwinTopBonusIndices);
 
-            if (_run.LastBalanceBonusApplied)
-                hi.Add(_run.LastBalanceBonusIndex);
+            // ★ Balance：実際に介入した全 index をハイライト
+            if (_run.LastBalanceMoves != null && _run.LastBalanceMoves.Count > 0)
+            {
+                for (int i = 0; i < _run.LastBalanceMoves.Count; i++)
+                {
+                    hi.Add(_run.LastBalanceMoves[i].index);
+                }
+            }
 
             handsSequenceView.Play(rr.EnemyHands, rr.PlayerHands, rr.Outcomes, hi);
         }
@@ -210,7 +216,7 @@ public sealed class RunPresenter : MonoBehaviour
                 if (rr.IsClear && rr.MissingColors != null && rr.MissingColors.Count > 0)
                 {
                     var sb = new System.Text.StringBuilder();
-                    sb.Append("欠損：");
+                    sb.Append("未使用色：");
 
                     bool first = true;
                     void AddOne(string name, float gain)
@@ -379,13 +385,17 @@ public sealed class RunPresenter : MonoBehaviour
                 if (_run.LastHeavyBonusApplied)
                 {
                     sb.Append('\n');
-                    sb.Append($"偏重ボーナス：一度だけ{ToJpColor(_run.LastHeavyBonusPlayerColor)}での負けが勝ちになりました");
+                    sb.Append($"デッキタイプボーナス（偏重）：");
+                    sb.Append('\n');
+                    sb.Append($"{ToJpColor(_run.LastHeavyBonusPlayerColor)}に特化した構築により、不利な手を一度だけ覆しました");
                 }
 
                 if (_run.LastTwinTopBonusWinCount > 0)
                 {
                     sb.Append('\n');
-                    sb.Append($"２トップボーナス：３連で交互に出せた時の負けが{_run.LastTwinTopBonusWinCount}回勝ちになりました");
+                    sb.Append($"デッキタイプボーナス（２トップ）：");
+                    sb.Append('\n');
+                    sb.Append($"２トップボーナス：２色を交互に出し続けた流れで、{_run.LastTwinTopBonusWinCount}回負けを覆しました");
                 }
 
                 // ---- Balance ----
@@ -397,7 +407,9 @@ public sealed class RunPresenter : MonoBehaviour
                 if (_run.LastBalanceBonusApplied)
                 {
                     sb.Append('\n');
-                    sb.Append("バランスボーナス：確定ドローにより引き直しを行いました");
+                    sb.Append("デッキタイプボーナス（バランス）：");
+                    sb.Append('\n');
+                    sb.Append(BuildBalancePlanLineJa(rr));
 
                     if (_run.LastBalanceMoves != null && _run.LastBalanceMoves.Count > 0)
                     {
@@ -427,12 +439,6 @@ public sealed class RunPresenter : MonoBehaviour
                         sb.Append('\n');
                         sb.Append(BuildBalanceRefundLineJa());
                     }
-
-                    if (rr.IsClear && rr.MissingColors != null && rr.MissingColors.Count > 0 && _run.LastBalanceBonusCreatedMissing)
-                    {
-                        sb.Append('\n');
-                        sb.Append("これにより欠損勝利が発生し、ゲージが溜まりました。");
-                    }
                 }
                 else if (hasRefund)
                 {
@@ -455,6 +461,29 @@ public sealed class RunPresenter : MonoBehaviour
 
                 string mid = string.Join(", ", parts);
                 return $"使わなかったゲージ（{mid}）は返却されました";
+            }
+
+            private string BuildBalancePlanLineJa(RoundResult rr)
+            {
+                // 「2色未使用ボーナス狙い」っぽいケース
+                bool aimedForUnusedColorBonus =
+                    rr != null &&
+                    rr.IsClear &&
+                    rr.MissingColors != null &&
+                    rr.MissingColors.Count >= 2 &&          // 2種欠損勝利 = MissingColors.Count >= 2
+                    _run.LastBalanceBonusCreatedMissing;     // その介入で作った（あなたの意図フラグ）
+
+                if (aimedForUnusedColorBonus)
+                    return "未使用色ボーナスを狙い、確定ドローを割り当てました";
+
+                // 通常（負け数を増やさない＝安定狙い）
+                return "負け数を増やさないように、確定ドローを割り当てました";
+            }
+
+            private string BuildUnusedColorBonusLineJa()
+            {
+                // 「欠損勝利」→「未使用色ボーナス」へ言い換え
+                return "これにより未使用色ボーナスが発生し、ゲージが溜まりました。";
             }
 
 }

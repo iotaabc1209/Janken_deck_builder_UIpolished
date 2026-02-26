@@ -1,9 +1,8 @@
+// Assets/Scripts/Unity/TutorialOverlayView.cs
 using System;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
-using UnityEngine.EventSystems;
-
 
 public sealed class TutorialOverlayView : MonoBehaviour
 {
@@ -23,43 +22,50 @@ public sealed class TutorialOverlayView : MonoBehaviour
         StartGift
     }
 
+    public enum ArrowSide { None, Left, Right }
+
     [Serializable]
     public sealed class Step
     {
         public StepId id;
-        [TextArea(2, 4)] public string text;
+
+        [TextArea(2, 4)]
+        public string text;
+
         public RectTransform highlightTarget;
 
+        // true のとき、このオーバーレイ上のクリックでは進まない（外部操作待ち）
         public bool waitForExternalAction;
-
-        // ★追加：このStepで必要な外部操作回数
-        public int requiredExternalCount;
     }
-
 
     [Header("UI")]
     [SerializeField] private GameObject root;
     [SerializeField] private TMP_Text bodyText;
 
+    [Header("Focus Dimmer (Hole Mask Shader)")]
+    [SerializeField] private GameObject dimmer;          // Darkmask ルート
+    [SerializeField] private Image dimmerImage;          // Darkmask の Image（穴あきMaterialを持つ）
+    [SerializeField] private bool defaultDim = true;     // ほぼ全Stepで暗くする
+    [SerializeField] private Vector2 spotlightPadding = Vector2.zero; // 穴を少し広げたい時
+
     [Header("Highlight")]
-    [SerializeField] private RectTransform highlightFrame; // 枠画像(透明背景の上に表示)
+    [SerializeField] private RectTransform highlightFrame;
     [SerializeField] private Vector2 highlightPadding = new(16, 10);
+
+    [Header("Arrow (optional)")]
+    [SerializeField] private RectTransform arrow;
+    [SerializeField] private Vector2 arrowMargin = new(24f, 0f);
 
     [Header("Input")]
     [SerializeField] private Button tapCatcher;
-    [SerializeField] private float holdToSkipSec = 0.35f;
 
     [Header("Steps")]
     [SerializeField] private Step[] steps;
 
+    // 既存参照（壊しにくいので残す）
     [SerializeField] private GaugeBarView gaugeBarView;
     [SerializeField] private GameHudView hud;
     [SerializeField] private RunPresenter presenter;
-
-
-
-
-
 
     public bool IsOpen => root != null && root.activeSelf;
 
@@ -67,58 +73,50 @@ public sealed class TutorialOverlayView : MonoBehaviour
     public event Action OnFinished;
 
     private int _index = -1;
-    private float _pressTime = 0f;
-    private bool _pressing = false;
+    private int _externalCount = 0;
 
-    public bool waitForExternalAction;
-    private int _externalCount;
+    // ★現在のハイライト対象（穴の基準）
+    private RectTransform _currentHighlightTarget;
 
-
-
+    // シェーダープロパティ
+    private static readonly int ShaderHoleRect = Shader.PropertyToID("_HoleRect");
+    private static readonly int ShaderUseHole  = Shader.PropertyToID("_UseHole");
 
     private void Awake()
     {
         if (tapCatcher != null)
         {
+            tapCatcher.onClick.RemoveListener(OnTapNext);
             tapCatcher.onClick.AddListener(OnTapNext);
-
-            // 長押し判定（簡易）
-            var trigger = tapCatcher.gameObject.AddComponent<TutorialPressCatcher>();
-            trigger.OnDown += () => { _pressing = true; _pressTime = 0f; };
-            trigger.OnUp += () => { _pressing = false; _pressTime = 0f; };
         }
+
+        // クリックを邪魔しないための保険
+        ForceRaycastOff(dimmer);
+        ForceRaycastOff(arrow != null ? arrow.gameObject : null);
 
         CloseImmediate();
     }
 
-    private void Update()
-    {
-        if (!IsOpen) return;
-        if (!_pressing) return;
-
-        _pressTime += Time.unscaledDeltaTime;
-        if (_pressTime >= holdToSkipSec)
-        {
-            Finish();
-        }
-    }
-
     public void OpenFromStart()
     {
-        Debug.Log($"[TutorialOverlayView] OpenFromStart root={(root!=null ? root.name : "null")} beforeActive={(root!=null ? root.activeSelf.ToString() : "-")}");
         if (root != null) root.SetActive(true);
-        Debug.Log($"[TutorialOverlayView] OpenFromStart afterActive={(root!=null ? root.activeSelf.ToString() : "-")}");
 
         _index = -1;
+        _externalCount = 0;
+
         Next();
     }
-
 
     public void CloseImmediate()
     {
         if (root != null) root.SetActive(false);
         _index = -1;
+        _externalCount = 0;
+
         ApplyHighlight(null);
+
+        // 見た目は全部OFF
+        SetFocus(dim: false, showArrow: false, side: ArrowSide.None);
     }
 
     public void Next()
@@ -143,9 +141,13 @@ public sealed class TutorialOverlayView : MonoBehaviour
 
         ApplyHighlight(s.highlightTarget);
 
-        OnStepChanged?.Invoke(s);
         _externalCount = 0;
         ApplyStepInputMode(s);
+
+        // ★デフォルトで暗くする（矢印は必要なStepだけ上書き）
+        SetFocus(dim: defaultDim, showArrow: false, side: ArrowSide.None);
+
+        OnStepChanged?.Invoke(s);
     }
 
     private void Finish()
@@ -154,76 +156,9 @@ public sealed class TutorialOverlayView : MonoBehaviour
         OnFinished?.Invoke();
     }
 
-    private void ApplyHighlight(RectTransform target)
-    {
-        if (highlightFrame == null) return;
-
-        if (target == null || !target.gameObject.activeInHierarchy)
-        {
-            highlightFrame.gameObject.SetActive(false);
-            return;
-        }
-
-        highlightFrame.gameObject.SetActive(true);
-
-        // highlightFrame の親（座標系の基準）
-        var parent = highlightFrame.parent as RectTransform;
-        if (parent == null)
-        {
-            // 親がRectTransformじゃないのはUI的におかしいのでフォールバック
-            highlightFrame.position = target.position;
-            highlightFrame.sizeDelta = target.rect.size + highlightPadding * 2f;
-            return;
-        }
-
-        // Canvas と Camera を取得（ScreenPoint変換に必要）
-        var canvas = highlightFrame.GetComponentInParent<Canvas>();
-        Camera cam = null;
-        if (canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay)
-            cam = canvas.worldCamera;
-
-        // target のワールド四隅 → スクリーン座標 → parentローカル座標へ変換
-        Vector3[] wc = new Vector3[4];
-        target.GetWorldCorners(wc);
-
-        Vector2 min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
-        Vector2 max = new Vector2(float.NegativeInfinity, float.NegativeInfinity);
-
-        for (int i = 0; i < 4; i++)
-        {
-            Vector2 screen = RectTransformUtility.WorldToScreenPoint(cam, wc[i]);
-
-            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(parent, screen, cam, out var local))
-            {
-                min = Vector2.Min(min, local);
-                max = Vector2.Max(max, local);
-            }
-        }
-
-        // ローカル矩形から中心とサイズを作る
-        Vector2 center = (min + max) * 0.5f;
-        Vector2 size = (max - min);
-
-        // パディングを足す
-        size += highlightPadding * 2f;
-
-        // 反映（アンカーは触らない：anchoredPositionとsizeDeltaだけ）
-        highlightFrame.anchoredPosition = center;
-        highlightFrame.sizeDelta = size;
-    }
-
-
-    // 長押し用（簡易）
-    private sealed class TutorialPressCatcher : MonoBehaviour, IPointerDownHandler, IPointerUpHandler
-    {
-        public Action OnDown;
-        public Action OnUp;
-
-        public void OnPointerDown(UnityEngine.EventSystems.PointerEventData eventData) => OnDown?.Invoke();
-        public void OnPointerUp(UnityEngine.EventSystems.PointerEventData eventData) => OnUp?.Invoke();
-    }
-
-
+    // -------------------------
+    // External action gate
+    // -------------------------
 
     public void NotifyExternalAction()
     {
@@ -235,14 +170,8 @@ public sealed class TutorialOverlayView : MonoBehaviour
         if (!s.waitForExternalAction) return;
 
         _externalCount++;
-
-        // ★必要回数に達したら次へ
-        if (_externalCount >= Mathf.Max(1, s.requiredExternalCount))
-        {
-            Next();
-        }
+        Next();
     }
-
 
     private void OnTapNext()
     {
@@ -250,7 +179,6 @@ public sealed class TutorialOverlayView : MonoBehaviour
         if (steps == null || steps.Length == 0) { Finish(); return; }
         if (_index < 0 || _index >= steps.Length) { Next(); return; }
 
-        // ★待ちStepならタップでは進まない
         if (steps[_index].waitForExternalAction)
             return;
 
@@ -262,19 +190,169 @@ public sealed class TutorialOverlayView : MonoBehaviour
         if (tapCatcher == null) return;
 
         bool wait = (s != null && s.waitForExternalAction);
-
-        // 待ちStepでは、下のUIにクリックを通す
-        tapCatcher.interactable = !wait;
-
-        // Buttonが持ってるGraphic(Image)のRaycastも切る（これが超重要）
-        var g = tapCatcher.targetGraphic;
-        if (g != null) g.raycastTarget = !wait;
-
-        // もし tapCatcher の子に Image がある構成なら、まとめて切ってもOK（保険）
-        var imgs = tapCatcher.GetComponentsInChildren<UnityEngine.UI.Image>(true);
-        for (int i = 0; i < imgs.Length; i++)
-            imgs[i].raycastTarget = !wait;
+        SetButtonRaycast(tapCatcher, enabled: !wait);
     }
+
+    // -------------------------
+    // Highlight
+    // -------------------------
+
+    private void ApplyHighlight(RectTransform target)
+    {
+        _currentHighlightTarget = target; // ★穴の基準は target
+
+        if (highlightFrame == null) return;
+
+        if (target == null || !target.gameObject.activeInHierarchy)
+        {
+            highlightFrame.gameObject.SetActive(false);
+            return;
+        }
+
+        highlightFrame.gameObject.SetActive(true);
+
+        var parent = highlightFrame.parent as RectTransform;
+        if (parent == null)
+        {
+            highlightFrame.position = target.position;
+            highlightFrame.sizeDelta = target.rect.size + highlightPadding * 2f;
+            return;
+        }
+
+        var canvas = highlightFrame.GetComponentInParent<Canvas>();
+        Camera cam = null;
+        if (canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay)
+            cam = canvas.worldCamera;
+
+        Vector3[] wc = new Vector3[4];
+        target.GetWorldCorners(wc);
+
+        Vector2 min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
+        Vector2 max = new Vector2(float.NegativeInfinity, float.NegativeInfinity);
+
+        for (int i = 0; i < 4; i++)
+        {
+            Vector2 screen = RectTransformUtility.WorldToScreenPoint(cam, wc[i]);
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(parent, screen, cam, out var local))
+            {
+                min = Vector2.Min(min, local);
+                max = Vector2.Max(max, local);
+            }
+        }
+
+        Vector2 center = (min + max) * 0.5f;
+        Vector2 size = (max - min) + highlightPadding * 2f;
+
+        highlightFrame.anchoredPosition = center;
+        highlightFrame.sizeDelta = size;
+    }
+
+    // -------------------------
+    // Focus visuals (Dimmer / Arrow)
+    // -------------------------
+
+    public void SetFocus(bool dim, bool showArrow, ArrowSide side)
+    {
+        if (_currentHighlightTarget == null)
+                dim = false;
+
+        if (dimmer != null) dimmer.SetActive(dim);
+
+        // ★穴あきシェーダー更新
+        UpdateSpotlightShader(dim);
+
+        if (arrow == null) return;
+
+        bool on = showArrow && side != ArrowSide.None;
+        arrow.gameObject.SetActive(on);
+
+        if (on)
+            PositionArrow(side);
+    }
+
+    private void PositionArrow(ArrowSide side)
+    {
+        if (arrow == null || highlightFrame == null) return;
+        if (!highlightFrame.gameObject.activeInHierarchy) return;
+
+        var frame = highlightFrame;
+        float halfW = frame.rect.width * 0.5f;
+        Vector2 p = frame.anchoredPosition;
+
+        if (side == ArrowSide.Left)
+            p.x = frame.anchoredPosition.x - halfW - arrowMargin.x;
+        else if (side == ArrowSide.Right)
+            p.x = frame.anchoredPosition.x + halfW + arrowMargin.x;
+
+        p.y = frame.anchoredPosition.y + arrowMargin.y;
+        arrow.anchoredPosition = p;
+    }
+
+    // -------------------------
+    // Hole-mask shader update
+    // -------------------------
+
+    private void UpdateSpotlightShader(bool dim)
+    {
+        if (!dim || dimmerImage == null) return;
+
+        var mat = dimmerImage.material;
+        if (mat == null) return;
+
+        var target = _currentHighlightTarget;
+
+        // ★ハイライトが無いStepは「暗くしない」
+        if (target == null || !target.gameObject.activeInHierarchy)
+        {
+            // 暗幕そのものをOFF
+            if (dimmer != null)
+                dimmer.SetActive(false);
+
+            mat.SetFloat(ShaderUseHole, 0f);
+            return;
+        }
+
+        var dimRt = dimmerImage.rectTransform;
+        if (dimRt == null)
+        {
+            mat.SetFloat(ShaderUseHole, 0f);
+            return;
+        }
+
+        if (!TryGetRectInLocal(dimRt, target, out var holeLocal))
+        {
+            mat.SetFloat(ShaderUseHole, 0f);
+            return;
+        }
+
+        // 任意：少し広げる
+        holeLocal.xMin -= spotlightPadding.x;
+        holeLocal.xMax += spotlightPadding.x;
+        holeLocal.yMin -= spotlightPadding.y;
+        holeLocal.yMax += spotlightPadding.y;
+
+        var pr = dimRt.rect;
+
+        float xMin = Mathf.InverseLerp(pr.xMin, pr.xMax, holeLocal.xMin);
+        float xMax = Mathf.InverseLerp(pr.xMin, pr.xMax, holeLocal.xMax);
+        float yMin = Mathf.InverseLerp(pr.yMin, pr.yMax, holeLocal.yMin);
+        float yMax = Mathf.InverseLerp(pr.yMin, pr.yMax, holeLocal.yMax);
+
+        xMin = Mathf.Clamp01(xMin);
+        xMax = Mathf.Clamp01(xMax);
+        yMin = Mathf.Clamp01(yMin);
+        yMax = Mathf.Clamp01(yMax);
+
+        if (xMax < xMin) xMax = xMin;
+        if (yMax < yMin) yMax = yMin;
+
+        mat.SetVector(ShaderHoleRect, new Vector4(xMin, yMin, xMax, yMax));
+        mat.SetFloat(ShaderUseHole, 1f);
+    }
+
+    // -------------------------
+    // Queries
+    // -------------------------
 
     public bool IsCurrentStep(StepId id)
     {
@@ -290,5 +368,69 @@ public sealed class TutorialOverlayView : MonoBehaviour
             Next();
     }
 
+    // -------------------------
+    // Utilities
+    // -------------------------
 
+    private static void SetButtonRaycast(Button b, bool enabled)
+    {
+        if (b == null) return;
+
+        b.interactable = enabled;
+
+        var graphics = b.GetComponentsInChildren<Graphic>(true);
+        for (int i = 0; i < graphics.Length; i++)
+            graphics[i].raycastTarget = enabled;
+    }
+
+    private static void ForceRaycastOff(GameObject go)
+    {
+        if (go == null) return;
+        var graphics = go.GetComponentsInChildren<Graphic>(true);
+        for (int i = 0; i < graphics.Length; i++)
+            graphics[i].raycastTarget = false;
+    }
+
+    private static bool TryGetRectInLocal(RectTransform localRoot, RectTransform target, out Rect rect)
+    {
+        rect = default;
+        if (localRoot == null || target == null) return false;
+
+        var canvas = localRoot.GetComponentInParent<Canvas>();
+        Camera cam = null;
+        if (canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay)
+            cam = canvas.worldCamera;
+
+        Vector3[] wc = new Vector3[4];
+        target.GetWorldCorners(wc);
+
+        Vector2 min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
+        Vector2 max = new Vector2(float.NegativeInfinity, float.NegativeInfinity);
+
+        for (int i = 0; i < 4; i++)
+        {
+            Vector2 screen = RectTransformUtility.WorldToScreenPoint(cam, wc[i]);
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(localRoot, screen, cam, out var local))
+            {
+                min = Vector2.Min(min, local);
+                max = Vector2.Max(max, local);
+            }
+        }
+
+        rect = Rect.MinMaxRect(min.x, min.y, max.x, max.y);
+        return true;
+    }
+
+    public void RefreshHighlightNow()
+    {
+        if (!IsOpen) return;
+
+        // いま刺さってる target で枠を作り直す
+        ApplyHighlight(_currentHighlightTarget);
+
+        // dimmerがONなら穴も更新（material更新）
+        // defaultDim運用なので「dimmerがActiveか」で十分
+        bool dim = (dimmer != null && dimmer.activeSelf);
+        UpdateSpotlightShader(dim);
+    }
 }

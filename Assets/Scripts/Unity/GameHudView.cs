@@ -59,7 +59,9 @@ public sealed class GameHudView : MonoBehaviour
                 if (!run.TryGetEnemyMainColor(a, out var main))
                     main = RpsColor.Gu;
 
-                return $"{a.ToJaLabel(main)} {w:0.00}";
+                // ★ 0.60 → 60%
+                int percent = Mathf.RoundToInt(w * 100f);
+                return $"{a.ToJaLabel(main)} {percent}%";
             }
 
             // 統計（2行構成）
@@ -121,14 +123,14 @@ public sealed class GameHudView : MonoBehaviour
             if (_mode == HudViewMode.Compact)
             {
                 // 要約のみ（軽量）
-                headerText.text = $"環境：{BuildEnvSummary(run)}";
+                headerText.text = $"デッキ傾向：{BuildEnvSummary(run)}";
             }
             else
             {
                 // ===== 既存の詳細表示（今のコードをそのまま） =====
 
                 headerText.text =
-                    $"環境：\n{envText}\n" +
+                    $"デッキ傾向：\n{envText}\n" +
                     "統計：\n" +
                     $"{statsText}";
             }

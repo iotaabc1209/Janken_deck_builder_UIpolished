@@ -59,6 +59,9 @@ public sealed class RoundFlowUI : MonoBehaviour
     [Header("Debug")]
     [SerializeField] private bool debugLog = true;
 
+    [SerializeField] private float proceedLockSecondsAfterSkip = 0.25f; // 0.2〜0.3 推奨
+    private float _proceedLockUntil = 0f;
+
     private ViewMode _viewMode = ViewMode.ResolveOnly;
     private bool _booted;
     private bool _tutorialResetDone = false;
@@ -67,9 +70,15 @@ public sealed class RoundFlowUI : MonoBehaviour
 
     // DeckAdjust step中は「右の調整ボタンだけ押してね」モード
     private bool _deckAdjustClickOnly = false;
+    // ★追加：チュートリアル終了直後、1回でも調整（デッキ/ゲージ/予約）するまでProceed禁止
+    private bool _lockProceedUntilFirstAdjust = false;
+    // ★追加：AdjustPanelView.Open()/内部Resetなどが発火する OnDraftChanged を「最初の1回だけ」無視する
+    private bool _ignoreNextDraftChanged = false;
 
     private const string HintTutorial = "次のページへ";
-    private const string HintNextBattle = "次の勝負へ";
+    private const string HintNextBattle = "次の勝負へ（調整はパネルをクリック）";
+
+    private const string LogAdjustThenProceed = "デッキやゲージを調整してから、次へ進んでください";
 
     private Coroutine _fitLeftWindowCo;
 
@@ -182,6 +191,10 @@ public sealed class RoundFlowUI : MonoBehaviour
         // ★チュートリアル中は下パネル進行を禁止（連打事故防止）
         if (tutorial != null && tutorial.IsOpen) return;
 
+        // ★スキップ直後の連打による誤進行を防ぐ
+        if (Time.unscaledTime < _proceedLockUntil)
+            return;
+
         if (presenter == null) { LogWarn("OnProceed: presenter NULL"); return; }
         if (presenter.Run == null) { LogWarn("OnProceed: run NULL"); return; }
 
@@ -196,17 +209,28 @@ public sealed class RoundFlowUI : MonoBehaviour
             (adjustPanel != null && adjustPanel.activeSelf) ||
             (_viewMode == ViewMode.WithAdjust);
 
+        // ★チュートリアル終了直後：一度でも調整するまで、Adjust中のProceedを禁止（連打で試合開始しない）
+        if (adjustActuallyOpen && _lockProceedUntilFirstAdjust)
+            return;
+
         // Resolve中：スキップ→できなければ次ラウンド
         if (!adjustActuallyOpen)
         {
             if (presenter.TrySkipResolveSequence())
-                return;
+            {
+                    // ★スキップ直後は短時間だけProceedを無効化して誤進行を防ぐ
+                    _proceedLockUntil = Time.unscaledTime + proceedLockSecondsAfterSkip;
 
-            presenter.PlayNextRound();
-            presenter.RefreshHud();
-            RefreshResolveRightWindow();
-            RefreshProceedInteractable();
-            return;
+                    // 見た目も即座に反映（押せない感じにする）
+                    RefreshProceedInteractable();
+                    return;
+            }
+
+                presenter.PlayNextRound();
+                presenter.RefreshHud();
+                RefreshResolveRightWindow();
+                RefreshProceedInteractable();
+                return;
         }
 
         // Adjust中：確定できないなら止める
@@ -274,6 +298,21 @@ public sealed class RoundFlowUI : MonoBehaviour
 
     private void HandleAdjustChanged()
     {
+        // ★Open直後/内部リセット等で飛ぶ OnDraftChanged を1回だけ無視（誤解除防止）
+        if (_ignoreNextDraftChanged)
+        {
+            _ignoreNextDraftChanged = false;
+            return;
+        }
+
+        // ★チュートリアル終了直後：初回の実操作（デッキ/ゲージ/予約どれでも）で解除
+        if (_lockProceedUntilFirstAdjust)
+        {
+            _lockProceedUntilFirstAdjust = false;
+            RefreshProceedInteractable();
+            if (presenter != null) presenter.SetRoundLog("");
+        }
+
         if (_viewMode != ViewMode.WithAdjust) return;
 
         RefreshProceedInteractable();
@@ -281,8 +320,22 @@ public sealed class RoundFlowUI : MonoBehaviour
         if (reservedSlotsView != null && adjustView != null)
             reservedSlotsView.Render(adjustView.GetDraftForcedOrder());
 
-        // ---- チュートリアル：ForcedDraw step（グー予約2枚で進行） ----
-        if (tutorial != null && tutorial.IsOpen && tutorial.IsCurrentStep(TutorialOverlayView.StepId.ForcedDraw))
+        if (tutorial == null || !tutorial.IsOpen) return;
+
+        // ---- 1) チュートリアル：GaugeBuy step（購入が合計2になったら次へ）----
+        if (tutorial.IsCurrentStep(TutorialOverlayView.StepId.GaugeBuy))
+        {
+            if (adjustView != null)
+            {
+                // グーを4回購入（＝ゲージ2本分）
+                if (adjustView.GetDraftGaugeBuyCount(RpsColor.Gu) >= 4)
+                    tutorial.NotifyExternalAction();
+            }
+            return;
+        }
+
+        // ---- 2) チュートリアル：ForcedDraw step（グー予約2枚で進行：元の挙動に戻す）----
+        if (tutorial.IsCurrentStep(TutorialOverlayView.StepId.ForcedDraw))
         {
             if (adjustView != null)
             {
@@ -296,8 +349,9 @@ public sealed class RoundFlowUI : MonoBehaviour
                 }
 
                 if (guCount >= 2)
-                    tutorial.NotifyExternalAction(); // ここで次へ
+                    tutorial.NotifyExternalAction();
             }
+            return;
         }
     }
 
@@ -569,6 +623,13 @@ public sealed class RoundFlowUI : MonoBehaviour
             return;
         }
 
+        // ★追加：チュートリアル終了直後ロック中（Adjust中のみ）
+        if (_lockProceedUntilFirstAdjust && _viewMode == ViewMode.WithAdjust)
+        {
+            bottomPanelButton.interactable = false;
+            return;
+        }
+
         // Resolveは常に進める
         if (_viewMode == ViewMode.ResolveOnly)
         {
@@ -621,6 +682,9 @@ public sealed class RoundFlowUI : MonoBehaviour
 
         yield return null; // 2回目：レイアウト遅延保険
         FitLeftWindowOnce();
+
+        if (tutorial != null && tutorial.IsOpen)
+            tutorial.RefreshHighlightNow();
     }
 
     private void FitLeftWindowOnce()
@@ -686,19 +750,26 @@ public sealed class RoundFlowUI : MonoBehaviour
 
     private void HandleTutorialFinished()
     {
-        // チュートリアル終了直後は、まずドラフトの残骸を消す（安全側）
+        _lockProceedUntilFirstAdjust = true;
+        _ignoreNextDraftChanged = true;
+
         if (adjustView != null)
             adjustView.ResetTutorialGaugeAndReservation();
 
         if (reservedSlotsView != null && adjustView != null)
             reservedSlotsView.Render(adjustView.GetDraftForcedOrder());
 
+        ApplyTutorialGates();
+        RefreshProceedInteractable();
 
-        // ★重要：tutorial.IsOpen==false になった後の入力ゲートを通常に戻す
-        ApplyTutorialGates();            // ←これ追加（not tut 分岐で raycastTarget が復活する）
-        RefreshProceedInteractable();    // ←保険
-        // RoundLog はチュートリアル中ずっと空だったはずなので、ここから演出してOK
-        StartCoroutine(TutorialExitToAdjustFlow());
+        // ★追加：ロック中の案内はRoundLogに出す
+        if (presenter != null)
+        {
+            presenter.SetRoundLog(LogAdjustThenProceed);
+            presenter.RefreshHud();
+        }
+
+        // StartCoroutine(TutorialExitToAdjustFlow()); // 削除済みのまま
     }
 
     private IEnumerator TutorialExitToAdjustFlow()

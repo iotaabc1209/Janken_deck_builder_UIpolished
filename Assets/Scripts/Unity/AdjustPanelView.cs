@@ -80,7 +80,7 @@ public sealed class AdjustPanelView : MonoBehaviour
 
         var prof = presenter.Run.PlayerProfile;
         if (deckText != null)
-            deckText.text = $"デッキ：グー/チョキ/パー： {prof.Gu}/{prof.Choki}/{prof.Pa}";
+            deckText.text = $"変更前デッキ：グー/チョキ/パー： {prof.Gu}/{prof.Choki}/{prof.Pa}";
 
         ResetDraft();                // Adjustに入るたび初期化（方針通り）
         _draftForcedOrder.Clear();   // 保険（ResetDraftでも消してるがOK）
@@ -124,7 +124,7 @@ public sealed class AdjustPanelView : MonoBehaviour
             else
             {
                 var info = PlayerArchetypeClassifier.Classify(shown);
-                playerArchetypeText.text = $"自分：{info.ToJaLabel()}";
+                playerArchetypeText.text = $"デッキタイプ：{info.ToJaLabel()}";
             }
         }
 
@@ -652,5 +652,15 @@ public sealed class AdjustPanelView : MonoBehaviour
     public System.Collections.Generic.IReadOnlyList<RpsColor> GetDraftForcedOrder()
     {
         return _draftForcedOrder;
+    }
+
+    public int GetDraftGaugeBuyTotal()
+    {
+        return _gaugeBuy[0] + _gaugeBuy[1] + _gaugeBuy[2];
+    }
+
+    public int GetDraftGaugeBuyCount(RpsColor c)
+    {
+        return _gaugeBuy[(int)c];
     }
 }
